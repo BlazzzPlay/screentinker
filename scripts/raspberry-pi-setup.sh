@@ -12,7 +12,7 @@
 #   git clone https://github.com/screentinker/screentinker.git
 #   cd screentinker/scripts && sudo ./raspberry-pi-setup.sh
 #
-# Works on Raspberry Pi OS Lite or Desktop (Bookworm / Bullseye)
+# Works on Raspberry Pi OS Lite or Desktop (Bullseye / Bookworm / Trixie — Debian 11-13)
 # Tested on Pi 3B+, Pi 4, Pi 5
 
 set -euo pipefail
@@ -346,42 +346,32 @@ fi
 log "Creating kiosk service..."
 
 if [ "$HAS_DESKTOP" = false ]; then
-    # Lite: start X ourselves
-    if [ "$PLAYER_ONLY" = false ]; then
-        KIOSK_AFTER="After=screentinker-server.service"
-        KIOSK_REQ="Requires=screentinker-server.service"
-    else
-        KIOSK_AFTER="After=network-online.target"
-        KIOSK_REQ="Wants=network-online.target"
+    # === Lite: launch X from the tty1 AUTOLOGIN LOGIN SESSION, NOT a systemd service ===
+    # Debian's Xorg wrapper (/etc/X11/Xwrapper.config, default allowed_users=console) refuses to
+    # start X from a session-less systemd system service, so a `startx` service just crash-loops
+    # and the Pi sits at the tty1 console (Finding A). The tty1 autologin (section 9) is a real
+    # console session on vt1; this ~/.bash_profile hook execs startx from THAT session, which the
+    # wrapper permits. The getty owns vt1 (one owner — no getty<->service race).
+    cat > "$PI_HOME/.bash_profile" << 'PROFILEEOF'
+# ScreenTinker kiosk launch (auto-generated). Normal logins still work; on the tty1 autologin
+# session we start X, which runs ~/.xinitrc -> the kiosk browser.
+[ -f "$HOME/.profile" ] && . "$HOME/.profile"
+if [ -z "${DISPLAY:-}" ] && [ "${XDG_VTNR:-}" = "1" ]; then
+    exec startx "$HOME/.xinitrc" -- vt1
+fi
+PROFILEEOF
+    chown "$PI_USER":"$PI_USER" "$PI_HOME/.bash_profile"
+
+    # Remove any kiosk system service left by a prior (broken) run of this script, so nothing
+    # competes with the getty for vt1.
+    if [ -f /etc/systemd/system/screentinker-kiosk.service ]; then
+        systemctl disable --now screentinker-kiosk.service 2>/dev/null || true
+        rm -f /etc/systemd/system/screentinker-kiosk.service
     fi
-
-    cat > /etc/systemd/system/screentinker-kiosk.service << EOF
-[Unit]
-Description=ScreenTinker Kiosk Display
-${KIOSK_AFTER}
-${KIOSK_REQ}
-
-[Service]
-Type=simple
-User=${PI_USER}
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=${PI_HOME}/.Xauthority
-ExecStartPre=/bin/sleep 3
-ExecStart=/usr/bin/startx ${PI_HOME}/.xinitrc -- :0 -nolisten tcp vt1
-Restart=always
-RestartSec=10
-
-TTYPath=/dev/tty1
-StandardInput=tty
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=screentinker-kiosk
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    systemctl daemon-reload
+    log "Kiosk configured to start from the tty1 autologin session (Lite)"
 else
-    # Desktop: X already running, just launch Chromium
+    # === Desktop: X already running (lightdm/labwc); launch Chromium via a graphical service ===
     if [ "$PLAYER_ONLY" = false ]; then
         KIOSK_AFTER="After=screentinker-server.service graphical.target"
         KIOSK_REQ="Requires=screentinker-server.service"
@@ -412,11 +402,10 @@ SyslogIdentifier=screentinker-kiosk
 [Install]
 WantedBy=graphical.target
 EOF
+    systemctl daemon-reload
+    systemctl enable screentinker-kiosk.service
+    log "Kiosk service enabled (Desktop)"
 fi
-
-systemctl daemon-reload
-systemctl enable screentinker-kiosk.service
-log "Kiosk service enabled"
 
 # Desktop: autostart entry as fallback
 if [ "$HAS_DESKTOP" = true ]; then
