@@ -297,7 +297,29 @@ if [ -z "\$SCREEN_W" ] || [ -z "\$SCREEN_H" ]; then
     SCREEN_H=1080
 fi
 
+# --- GPU flags (model-aware) — Finding B: Pi-3 VideoCore GL compositor can render a WHITE screen ---
+# UNVERIFIED HYPOTHESIS (must be confirmed on real Pi-3 HW): on Pi 3 / older the Chromium GPU
+# compositor never presents a frame -> blank white display even though the page/JS/WebSocket all
+# work and a pairing code is issued. Software-render on Pi 3/older; keep HW acceleration on Pi 4/5.
+# Override the whole set with SCREENTINKER_KIOSK_FLAGS for field tuning.
+# NOTE: Raspberry Pi OS *trixie* Desktop defaults to Wayland (labwc); --ozone-platform-hint=auto
+# lets Chromium pick Wayland or X as available.
+MODEL="\$(tr -d '\\0' < /proc/device-tree/model 2>/dev/null)"
+GPU_FLAGS="--ozone-platform-hint=auto"
+if echo "\$MODEL" | grep -qE "Raspberry Pi (4|5|400|500)"; then
+    : # Pi 4/5: keep GPU acceleration on
+else
+    # Pi 3 / Zero / older (or unknown): software-render to dodge the VideoCore white screen
+    GPU_FLAGS="\$GPU_FLAGS --disable-gpu --disable-gpu-compositing"
+    # If still blank on real HW, also try full software GL (uncomment):
+    # GPU_FLAGS="\$GPU_FLAGS --use-gl=swiftshader"
+fi
+# Field-tester override: export SCREENTINKER_KIOSK_FLAGS="..." to REPLACE the auto-selected set.
+KIOSK_FLAGS="\${SCREENTINKER_KIOSK_FLAGS:-\$GPU_FLAGS}"
+echo "Kiosk: model='\$MODEL' gpu_flags='\$KIOSK_FLAGS'"
+
 exec ${CHROMIUM_BIN} \\
+    \$KIOSK_FLAGS \\
     --kiosk \\
     --window-position=0,0 \\
     --window-size=\${SCREEN_W},\${SCREEN_H} \\
